@@ -45,6 +45,7 @@ function refreshSystemPromptFile(claw, storageDir, contextIntel = '') {
     if (contextIntel) parts.push(contextIntel);
     parts.push(PRE_SEARCH_DIRECTIVE);
     parts.push(ESCALATE_DIRECTIVE);
+    parts.push(MODEL_REGISTRY_DIRECTIVE);
     if (parts.length === 0) return;
     const content = '## metoo-claw 自我认知（实时生成）\n\n' + parts.join('\n\n') + '\n';
     // hash 对比：内容没变则跳过写盘
@@ -142,6 +143,26 @@ async function _gatherContextIntelImpl(claw, userText) {
 
 // 调试导出（测试用）
 export { gatherContextIntel };
+
+/** 模型库指引：告诉模型有哪些专用模型可按需调用 */
+const MODEL_REGISTRY_DIRECTIVE = `## 可调用的专用模型库（按需调用，不影响默认模型）
+
+除了你自己（默认模型），还可以随时调用以下专用模型处理特定任务。调用方式：用 sessions_spawn 工具 spawn 子代理，并指定 model 参数。
+
+可用模型：
+- **代码模型** \`omlx/Qwen2.5-Coder-7B-4bit\`：代码生成、调试、重构（本地，快）
+- **润色模型** \`apfel/apple-foundationmodel\`：文本润色、改写、更自然的表达（本地）
+- **推理模型** \`deepseek/deepseek-reasoner\`：数学证明、复杂逻辑推理
+- **长文档模型** \`zhipu/glm-5.2\`：超长文档分析、大上下文（1M）
+
+**何时主动调用**：遇到明显属于某类专长且能显著提升质量的任务时，可以用 sessions_spawn 调对应模型。例如：
+- 用户要求写较复杂的代码 → spawn 代码模型
+- 用户要求润色文章 → spawn 润色模型
+- 数学/逻辑证明题 → spawn 推理模型
+
+**用户指定调用**：如果用户明确说"用代码模型""用润色模型"等，直接按要求 spawn 对应模型。
+
+**注意**：简单任务不要滥用子代理（有额外开销）。只有确实能用专长模型明显提升质量时才调用。调用后把子代理的结果整合进你的回答。`;
 
 /** 梯度升级指令：flash 判断搞不定时主动喊 pro 救场 */
 const ESCALATE_DIRECTIVE = `## 能力升级机制（梯度升级）

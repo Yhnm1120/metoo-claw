@@ -141,8 +141,9 @@ _gw_log_check() {
   local log_file="/tmp/openclaw/openclaw-$(date +%Y-%m-%d).log"
   [ ! -f "$log_file" ] && return 0
   local errors
-  errors=$(tail -50 "$log_file" 2>/dev/null | grep -c -E "lane task error|AUTH_FAILED|INVALID_REQUEST|restart failed" || echo 0)
-  [ "$errors" -lt 3 ]
+  errors=$(tail -50 "$log_file" 2>/dev/null | grep -c -E "lane task error|AUTH_FAILED|INVALID_REQUEST|restart failed" 2>/dev/null || true)
+  errors=$(echo "$errors" | tr -d ' \n')
+  [ "${errors:-0}" -lt 3 ]
 }
 
 _gw_ws_check() {

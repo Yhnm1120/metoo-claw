@@ -7,6 +7,9 @@
  */
 
 import { createMetooClaw } from '../dist/metoo-claw.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 
 // 每个会话一个 metoo-claw 实例
 const instances = new Map();
@@ -17,6 +20,30 @@ function getInstance(agentId, sessionKey, storageDir) {
     instances.set(key, createMetooClaw(agentId, sessionKey, storageDir));
   }
   return instances.get(key);
+}
+
+/**
+ * 把当前自我认知写成 system prompt 附加文件。
+ * Gateway 补丁会读取此文件并追加到 system prompt 尾部。
+ * 每次 hook 事件后刷新，保证能力/成功率变化实时反映到 prompt。
+ */
+function refreshSystemPromptFile(claw, storageDir) {
+  try {
+    const parts = [];
+    const cap = claw.selfAwareness.capabilityRegistry.toPromptDescription();
+    const comp = claw.selfAwareness.competenceMap.toPromptDescription();
+    const bound = claw.selfAwareness.hardBoundary.toPromptDescription();
+    if (cap && cap.length > 10) parts.push(cap);
+    if (comp && comp.length > 10) parts.push(comp);
+    if (bound && bound.length > 10) parts.push(bound);
+    if (parts.length === 0) return;
+    const content = '## metoo-claw 自我认知（实时生成）\n\n' + parts.join('\n\n') + '\n';
+    const dir = storageDir.replace(/^~/, os.homedir());
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'system-prompt-extra.md'), content, 'utf-8');
+  } catch (e) {
+    // 写失败不影响主流程
+  }
 }
 
 /**
@@ -49,6 +76,8 @@ export default async function metooClawHook(event, config = {}) {
 
     // ═══ Agent 启动：注入自我认知 + 意图恢复 ═══
     case 'agent:bootstrap': {
+      // 首次启动：自动注册基础能力 + 安全边界
+      autoRegisterBaseline(claw);
       // 意图恢复
       if (config.intentResume !== false) {
         const hint = claw.selfAwareness.intentTracker.getResumeHint();
@@ -160,10 +189,63 @@ export default async function metooClawHook(event, config = {}) {
       break;
     }
   }
+
+  // 每个事件处理后刷新 system prompt 附加文件（供 Gateway 补丁读取）
+  refreshSystemPromptFile(claw, storageDir);
 }
 
 /** 供外部（status 命令等）查询状态 */
 export function getMetooStatus(agentId, sessionKey, storageDir) {
   const claw = getInstance(agentId, sessionKey, storageDir);
   return claw.selfAwareness.statusOracle.formatReport();
+}
+
+/** 首次启动时注册基础能力清单和安全边界（只注册一次） */
+function autoRegisterBaseline(claw) {
+  const reg = claw.selfAwareness.capabilityRegistry;
+  if (reg.getStats().total > 0) return; // 已注册过
+  const now = new Date().toISOString();
+  const coreTools = [
+    ['read', 'Read files', 5, 'none'], ['write', 'Create/overwrite files', 50, 'medium'],
+    ['edit', 'Exact file edits', 30, 'low'], ['exec', 'Run shell commands', 5000, 'medium'],
+    ['web_fetch', 'Fetch/extract URL', 8000, 'low'], ['web_search', 'Web search', 10000, 'low'],
+    ['browser', 'Control web browser', 15000, 'medium'], ['cron', 'Manage scheduled jobs', 50, 'low'],
+    ['message', 'Send channel messages', 3000, 'low'], ['sessions_spawn', 'Spawn sub-agents', 100, 'low'],
+    ['gateway', 'Gateway config/restart', 200, 'high'], ['memory_store', 'Store durable memory', 200, 'low'],
+    ['memory_record_search', 'Search memories', 2000, 'low'],
+  ];
+  for (const [name, desc, latency, danger] of coreTools) {
+    reg.register({
+      id: `tool:${name}`, type: 'tool', name, description: desc,
+      prerequisites: [], success_rate: 0.95, avg_latency_ms: latency,
+      limitations: [], danger_level: danger, source: 'builtin', registered_at: now,
+    });
+  }
+  // 安全边界（来自 AGENTS.md 红线）— 用 registry 的 permission rule
+  reg.addPermissionRule({
+    action: 'delete_email',
+    reason: '安全策略禁止删除邮件，任何情况下不可覆盖',
+  });
+  reg.addPermissionRule({
+    action: 'modify openclaw.json',
+    reason: 'Gateway 配置文件受保护，直接修改会导致崩溃，请用 gateway 工具 config.patch',
+  });
+  reg.addPermissionRule({
+    action: 'disable execution-validator',
+    reason: 'execution-validator 是核心安全组件，不可禁用',
+  });
+  // 初始擅长领域
+  claw.selfAwareness.competenceMap.setDomain('信息检索', 'high', {
+    best_tools: ['web_search', 'web_fetch'],
+  });
+  claw.selfAwareness.competenceMap.setDomain('代码开发', 'high', {
+    best_tools: ['write', 'edit', 'exec'],
+  });
+  claw.selfAwareness.competenceMap.setDomain('系统运维', 'medium', {
+    best_tools: ['exec', 'cron'],
+  });
+  claw.selfAwareness.competenceMap.setDomain('图像生成', 'incompetent', {
+    reason: '本地无图像生成模型',
+    fallback: '可调用 xiaoyi-image-creator skill',
+  });
 }

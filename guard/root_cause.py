@@ -72,24 +72,27 @@ def grab_logs(component, lines=80):
     return "\n\n".join(logs)[:6000]
 
 
+def get_local_models():
+    """返回可用的本地 OpenAI 兼容端点列表（按优先级）"""
+    return [
+        ("http://localhost:8000/v1", "Qwen3.5-9B-MLX-4bit"),   # MLX 主推理
+        ("http://localhost:11434/v1", "qwen2.5:7b"),           # Ollama 兼容端点
+    ]
+
+
 def diagnose_with_model(component, symptom, logs):
-    """调 deepseek 推理根因"""
-    key = get_deepseek_key()
-    if not key:
-        return None
-    base = get_base_url()
+    """优先用本地模型推理根因（免费、快、不依赖 keychain/外网）"""
     prompt = (
         "你是资深运维专家。系统组件 [%s] 出现异常：%s。\n\n"
         "以下是相关日志（可能不完整）：\n```\n%s\n```\n\n"
-        "请用简洁中文输出三段（每段一句话，不要标题符号）：\n"
+        "请用简洁中文输出三段（每段一句话）：\n"
         "根因：<最可能的原因>\n"
         "修复：<具体可操作的修复步骤>\n"
         "预防：<如何避免再次发生>\n"
-        "如果日志信息不足以判断，根因写'日志不足，疑似X'。"
+        "如果日志信息不足，根因写'日志不足，疑似X'。"
     ) % (component, symptom, logs or "（无可用日志）")
 
     body = json.dumps({
-        "model": "deepseek-chat",
         "messages": [
             {"role": "system", "content": "你是资深运维专家，擅长从日志定位根因。回答简洁、可操作。"},
             {"role": "user", "content": prompt},
@@ -97,14 +100,20 @@ def diagnose_with_model(component, symptom, logs):
         "temperature": 0.2,
         "max_tokens": 400,
     })
-    cmd = ("curl -s -m 30 '%s/chat/completions' -H 'Content-Type: application/json' "
-           "-H 'Authorization: Bearer %s' -d @-" % (base, key))
-    try:
-        r = subprocess.run(cmd, input=body, shell=True, capture_output=True, text=True, timeout=35)
-        data = json.loads(r.stdout)
-        return data["choices"][0]["message"]["content"].strip()
-    except Exception:
-        return None
+    for base, model in get_local_models():
+        try:
+            payload = json.loads(body)
+            payload["model"] = model
+            cmd = ("curl -s -m 30 '%s/chat/completions' -H 'Content-Type: application/json' -d @-" % base)
+            r = subprocess.run(cmd, input=json.dumps(payload), shell=True,
+                               capture_output=True, text=True, timeout=35)
+            data = json.loads(r.stdout)
+            text = data["choices"][0]["message"]["content"].strip()
+            if text and len(text) > 20:
+                return text
+        except Exception:
+            continue
+    return None
 
 
 def diagnose_rule_based(component, symptom):

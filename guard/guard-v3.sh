@@ -436,6 +436,32 @@ TREND_PREDICTOR="$GUARD_DIR/guard/trend_predictor.py"
 ROOT_CAUSE="$GUARD_DIR/guard/root_cause.py"
 SELF_HEAL="$GUARD_DIR/guard/self_heal_brain.py"
 CHANGE_TOPO="$GUARD_DIR/guard/change_topology.py"
+LOG_SENTINEL="$GUARD_DIR/guard/log_sentinel.py"
+
+# 日志语义扫描（整合老 logwatch，异常才去重推送，正常沉默）
+run_log_sentinel() {
+  [ ! -f "$LOG_SENTINEL" ] && return 0
+  local out
+  out=$("$PY3" "$LOG_SENTINEL" 2>/dev/null | grep -v NO_ANOMALY || true)
+  [ -z "$out" ] && return 0
+  echo "$out" | while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local sev cat count name
+    name=$(echo "$line" | "$PY3" -c 'import sys,json;print(json.loads(sys.stdin.read()).get("name","?"))' 2>/dev/null || echo "?")
+    sev=$(echo "$line" | "$PY3" -c 'import sys,json;print(json.loads(sys.stdin.read()).get("severity","P1"))' 2>/dev/null || echo "P1")
+    cat=$(echo "$line" | "$PY3" -c 'import sys,json;print(json.loads(sys.stdin.read()).get("category","?"))' 2>/dev/null || echo "?")
+    count=$(echo "$line" | "$PY3" -c 'import sys,json;print(json.loads(sys.stdin.read()).get("count",1))' 2>/dev/null || echo 1)
+    local level="warn"
+    [ "$sev" = "P0" ] && level="alert"
+    log "🔍 日志异常[$sev][$cat]: $name ×$count"
+    # P0 立即推送，P1 聚合推送
+    if [ "$sev" = "P0" ]; then
+      push_notify "alert" "$cat" "日志检测到严重异常 $name（${count} 次），请立即检查。"
+    else
+      push_notify "warn" "$cat" "日志检测到异常 $name（${count} 次），分类 $cat。"
+    fi
+  done
+}
 
 collect_metrics() {
   [ -f "$METRICS_COLLECTOR" ] && "$PY3" "$METRICS_COLLECTOR" >/dev/null 2>&1 || true
@@ -476,6 +502,7 @@ main() {
     check_network
     collect_metrics        # 采集时序指标
     run_trend_prediction   # 趋势预测预警
+    run_log_sentinel       # 日志语义异常扫描
     update_awareness
     sleep "$INTERVAL"
   done

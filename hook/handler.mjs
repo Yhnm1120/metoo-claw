@@ -44,6 +44,7 @@ function refreshSystemPromptFile(claw, storageDir, contextIntel = '') {
     if (bound && bound.length > 10) parts.push(bound);
     if (contextIntel) parts.push(contextIntel);
     parts.push(PRE_SEARCH_DIRECTIVE);
+    parts.push(ESCALATE_DIRECTIVE);
     if (parts.length === 0) return;
     const content = '## metoo-claw 自我认知（实时生成）\n\n' + parts.join('\n\n') + '\n';
     // hash 对比：内容没变则跳过写盘
@@ -141,6 +142,26 @@ async function _gatherContextIntelImpl(claw, userText) {
 
 // 调试导出（测试用）
 export { gatherContextIntel };
+
+/** 梯度升级指令：flash 判断搞不定时主动喊 pro 救场 */
+const ESCALATE_DIRECTIVE = `## 能力升级机制（梯度升级）
+
+你是日常对话模型（快但能力有限）。如果遇到超出你能力的任务，不要勉强给出质量差的回答。
+
+**何时应该请求升级**（任一命中）：
+- 需要深度推理、多步骤架构设计、复杂系统设计
+- 长代码生成（>50 行）或复杂调试
+- 你对答案不确定、在猜测
+- 需要多个工具协同完成的复杂任务
+- 用户明确要求“仔细分析”、“深入设计”、“详细规划”
+
+**如何请求升级**：
+如果判断需要升级，回复必须以特殊标记开头：
+[ESCALATE] 这个问题需要更强的模型处理，因为（简述原因）。
+
+系统检测到此标记后，会自动调用更强的模型重新回答。用户会先看到你的升级提示，然后看到强模型的流式回答。
+
+**不要升级的场景**：日常闲聊、简单问答、状态查询、翻译、总结、短代码——这些你能胜任，直接答，避免浪费。`;
 
 /** 先搜后答强制指令：让模型养成涉及时效性信息必须先查的习惯 */
 const PRE_SEARCH_DIRECTIVE = `## 回答前必须执行（先搜后答）

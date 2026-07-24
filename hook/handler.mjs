@@ -128,11 +128,42 @@ function formatRagIntel(raw) {
   return '### 相关知识库内容（回答时参考，标注来源）\n' + items.join('\n\n');
 }
 
+/** Guard 主动推送：读取 outbox 未读告警，读后清空（metoo-claw 转发给用户） */
+const GUARD_OUTBOX = '~/.openclaw/guard-outbox.jsonl';
+function drainGuardOutbox() {
+  try {
+    const p = GUARD_OUTBOX.replace(/^~/, os.homedir());
+    if (!fs.existsSync(p)) return '';
+    const raw = fs.readFileSync(p, 'utf-8').trim();
+    if (!raw) return '';
+    fs.writeFileSync(p, '', 'utf-8'); // 读完清空，避免重复
+    const lines = raw.split('\n').filter(Boolean).slice(-5);
+    const items = [];
+    for (const line of lines) {
+      try {
+        const d = JSON.parse(line);
+        const icon = d.level === 'alert' ? '🚨' : d.level === 'warn' ? '⚠️' : '✅';
+        const time = String(d.ts || '').slice(5, 16).replace('T', ' ');
+        items.push(`${icon} [${time}] ${d.message}`);
+      } catch {}
+    }
+    if (items.length === 0) return '';
+    return '### 🛡️ 运维通知（Guard 自动巡检）\n' + items.join('\n') +
+      '\n\n（以上是系统运维自动推送。若需人工处理，请提醒用户；已自动修复的仅供知悉。）';
+  } catch { return ''; }
+}
+
 /** 实际的情报检索逻辑（被带缓存的 gatherContextIntel 包装） */
 async function _gatherContextIntelImpl(claw, userText) {
   const sections = [];
   const text = String(userText || '').trim();
   if (!text) return '';
+
+  // 0. Guard 运维通知（最高优先：系统异常/修复结果主动推送）
+  try {
+    const guardMsg = drainGuardOutbox();
+    if (guardMsg) sections.push(guardMsg);
+  } catch {}
 
   // 1. 进行中的意图（跨会话延续的任务）
   try {

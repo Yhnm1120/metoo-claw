@@ -81,6 +81,53 @@ async function gatherContextIntel(claw, userText) {
   return intel;
 }
 
+/** RAG 知识库检索：调用本地 memory-rag.py，检索领域知识 */
+const RAG_SCRIPT = '~/.openclaw/workspace/memory-rag.py';
+const RAG_CACHE = new Map();
+const RAG_TTL = 60 * 1000; // 相同查询 60s 缓存
+
+async function ragSearch(query) {
+  const key = String(query || '').trim().slice(0, 60);
+  if (!key) return '';
+  const cached = RAG_CACHE.get(key);
+  if (cached && cached.expireAt > Date.now()) return cached.result;
+  let result = '';
+  try {
+    const { execFile } = await import('node:child_process');
+    const scriptPath = RAG_SCRIPT.replace(/^~/, os.homedir());
+    const cwd = path.dirname(scriptPath);
+    result = await new Promise((resolve) => {
+      // 8s 超时，避免拖慢响应
+      execFile('python3', [scriptPath, 'search', key], { cwd, timeout: 8000, maxBuffer: 1024 * 64 }, (err, stdout) => {
+        if (err) return resolve('');
+        resolve(String(stdout || ''));
+      });
+    });
+  } catch { result = ''; }
+  RAG_CACHE.set(key, { result, expireAt: Date.now() + RAG_TTL });
+  if (RAG_CACHE.size > 50) {
+    const now = Date.now();
+    for (const [k, v] of RAG_CACHE) if (v.expireAt <= now) RAG_CACHE.delete(k);
+  }
+  return result;
+}
+
+/** 解析 RAG 输出为精简的情报文本（只取前 2 条，截断） */
+function formatRagIntel(raw) {
+  if (!raw || !raw.includes('搜索结果')) return '';
+  const blocks = raw.split(/\n\d+\. \[/).slice(1, 3); // 最多 2 条
+  if (blocks.length === 0) return '';
+  const items = blocks.map(b => {
+    const scoreMatch = b.match(/^([\d.]+)\]/);
+    const srcMatch = b.match(/📄\s*(\S+)/);
+    // 取文本主体（去掉 score/source 行），限制长度
+    const text = b.replace(/^[\d.]+\]\s*[^\n]*\n/, '').replace(/📄[^\n]*\n/, '').trim().slice(0, 400);
+    const src = srcMatch ? srcMatch[1] : '知识库';
+    return `- [${src}] ${text}`;
+  });
+  return '### 相关知识库内容（回答时参考，标注来源）\n' + items.join('\n\n');
+}
+
 /** 实际的情报检索逻辑（被带缓存的 gatherContextIntel 包装） */
 async function _gatherContextIntelImpl(claw, userText) {
   const sections = [];
@@ -97,6 +144,13 @@ async function _gatherContextIntelImpl(claw, userText) {
       );
       sections.push('### 进行中的任务\n' + lines.join('\n'));
     }
+  } catch {}
+
+  // 1.5 知识库检索（本地 RAG，领域知识）
+  try {
+    const ragRaw = await ragSearch(text);
+    const ragIntel = formatRagIntel(ragRaw);
+    if (ragIntel) sections.push(ragIntel);
   } catch {}
 
   // 2. 相关工具的成功率画像（从历史学习）

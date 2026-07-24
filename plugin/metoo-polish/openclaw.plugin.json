@@ -1,0 +1,31 @@
+{
+  "id": "metoo-polish",
+  "name": "metoo Auto Polish",
+  "description": "发送前自动用 Apple 本地模型润色长文本回复",
+  "version": "1.0.0",
+  "kind": "hook",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "polishUrl": {
+        "type": "string",
+        "description": "润色模型的 OpenAI 兼容地址",
+        "default": "http://localhost:11535/v1/chat/completions"
+      },
+      "model": {
+        "type": "string",
+        "default": "apple-foundationmodel"
+      },
+      "minLength": {
+        "type": "number",
+        "description": "低于此字数不润色",
+        "default": 60
+      },
+      "enabled": {
+        "type": "boolean",
+        "default": true
+      }
+    }
+  }
+}

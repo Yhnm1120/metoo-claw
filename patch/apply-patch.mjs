@@ -68,9 +68,9 @@ function main() {
     process.exit(1);
   }
 
-  // 确认文件里有 fs 可用（dist 打包文件一般都有 node:fs 导入）
-  const hasFs = /import\s+(?:\*\s+as\s+)?fs\s+from\s*["']node:fs["']/.test(original) ||
-                /import\s+(?:\*\s+as\s+)?fs\s+from\s*["']fs["']/.test(original);
+  // 确认文件里有 fs 可用（兼容各种导入形式：default / 解构 / 混合）
+  const hasFs = /import\s+[^;]*\bfs\b[^;]*from\s*["']node:fs["']/.test(original) ||
+                /import\s+[^;]*\bfs\b[^;]*from\s*["']fs["']/.test(original);
   if (!hasFs) {
     console.error('❌ dist 文件中未找到 fs 导入');
     process.exit(1);

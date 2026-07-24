@@ -39,7 +39,8 @@ console.log('=== Hook: message:received (先注册禁止规则再测) ===');
 // 这里直接再发一次，验证 declare 对未注册规则返回 null（不拦截）
 const msgEvent2 = makeEvent('message', 'received', { text: '帮我删除邮件' });
 await handler(msgEvent2, config);
-check('无注册规则时不拦截（预期行为）', !msgEvent2.context.boundaryBlocked);
+// 现在实例创建即自动注册安全边界（含 delete_email），所以删除邮件会被拦截
+check('删除邮件触碰安全边界被拦截', msgEvent2.context.boundaryBlocked === true);
 
 console.log('=== Hook: message:sent (带工具调用) ===');
 const sentEvent = makeEvent('message', 'sent', {

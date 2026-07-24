@@ -17,7 +17,9 @@ const instances = new Map();
 function getInstance(agentId, sessionKey, storageDir) {
   const key = `${agentId}:${sessionKey}`;
   if (!instances.has(key)) {
-    instances.set(key, createMetooClaw(agentId, sessionKey, storageDir));
+    const claw = createMetooClaw(agentId, sessionKey, storageDir);
+    autoRegisterBaseline(claw); // 新实例立即初始化基础能力+边界，不依赖 bootstrap 事件
+    instances.set(key, claw);
   }
   return instances.get(key);
 }
@@ -26,8 +28,9 @@ function getInstance(agentId, sessionKey, storageDir) {
  * 把当前自我认知写成 system prompt 附加文件。
  * Gateway 补丁会读取此文件并追加到 system prompt 尾部。
  * 每次 hook 事件后刷新，保证能力/成功率变化实时反映到 prompt。
+ * @param {string} contextIntel 可选：针对当前用户消息查到的上下文情报（先查后答）
  */
-function refreshSystemPromptFile(claw, storageDir) {
+function refreshSystemPromptFile(claw, storageDir, contextIntel = '') {
   try {
     const parts = [];
     const cap = claw.selfAwareness.capabilityRegistry.toPromptDescription();
@@ -36,6 +39,7 @@ function refreshSystemPromptFile(claw, storageDir) {
     if (cap && cap.length > 10) parts.push(cap);
     if (comp && comp.length > 10) parts.push(comp);
     if (bound && bound.length > 10) parts.push(bound);
+    if (contextIntel) parts.push(contextIntel);
     if (parts.length === 0) return;
     const content = '## metoo-claw 自我认知（实时生成）\n\n' + parts.join('\n\n') + '\n';
     const dir = storageDir.replace(/^~/, os.homedir());
@@ -45,6 +49,72 @@ function refreshSystemPromptFile(claw, storageDir) {
     // 写失败不影响主流程
   }
 }
+
+/**
+ * 先查后答：收到用户消息后，主动检索相关上下文情报，
+ * 让模型回答前就看到（历史意图、相似任务经验、工具成功率、用户偏好）。
+ */
+async function gatherContextIntel(claw, userText) {
+  const sections = [];
+  const text = String(userText || '').trim();
+  if (!text) return '';
+
+  // 1. 进行中的意图（跨会话延续的任务）
+  try {
+    const intents = claw.selfAwareness.intentTracker.getActiveIntents();
+    if (intents.length > 0) {
+      const lines = intents.slice(0, 3).map(i =>
+        `- 「${i.goal}」进行中，进度 ${i.progress || 0}步` +
+        (i.current_step ? `，当前：${i.current_step}` : '')
+      );
+      sections.push('### 进行中的任务\n' + lines.join('\n'));
+    }
+  } catch {}
+
+  // 2. 相关工具的成功率画像（从历史学习）
+  try {
+    const stats = claw.selfAwareness.learningLoop.getStats();
+    const tools = stats?.tools || {};
+    const entries = Object.entries(tools)
+      .filter(([, s]) => (s.total_uses || 0) >= 1)
+      .map(([name, s]) => ({ name, rate: parseFloat(s.success_rate) || 0, total: s.total_uses }));
+    if (entries.length > 0) {
+      entries.sort((a, b) => b.rate - a.rate);
+      const lines = entries.slice(0, 5).map(e => {
+        const pct = (e.rate * 100).toFixed(0);
+        const warn = e.rate < 0.6 ? ' ⚠️ 不稳定' : '';
+        return `- ${e.name}: 成功率 ${pct}%（${e.total}次）${warn}`;
+      });
+      sections.push('### 工具使用经验（回答时优先用高成功率工具）\n' + lines.join('\n'));
+    }
+  } catch {}
+
+  // 3. 相关因果链（以前类似操作的结果）
+  try {
+    const chain = claw.selfAwareness.causalChain.getChain();
+    if (chain && chain.length > 0) {
+      // 简单关键词匹配最近相关事件
+      const keywords = text.match(/[\u4e00-\u9fa5]{2,}|[a-zA-Z]{4,}/g) || [];
+      const relevant = chain.filter(e => {
+        const hay = JSON.stringify(e).toLowerCase();
+        return keywords.some(kw => hay.includes(kw.toLowerCase()));
+      });
+      if (relevant.length > 0) {
+        const lines = relevant.slice(-3).map(e => {
+          const eff = e.effects?.[0];
+          return `- ${e.action?.tool || e.action?.type}: ${eff?.after ?? ''}`;
+        });
+        sections.push('### 历史相关操作\n' + lines.join('\n'));
+      }
+    }
+  } catch {}
+
+  if (sections.length === 0) return '';
+  return '## 上下文情报（先查后答，回答时必须参考）\n\n' + sections.join('\n\n');
+}
+
+// 调试导出（测试用）
+export { gatherContextIntel };
 
 /**
  * 主 hook handler
@@ -76,9 +146,7 @@ export default async function metooClawHook(event, config = {}) {
 
     // ═══ Agent 启动：注入自我认知 + 意图恢复 ═══
     case 'agent:bootstrap': {
-      // 首次启动：自动注册基础能力 + 安全边界
-      autoRegisterBaseline(claw);
-      // 意图恢复
+      // 意图恢复（能力注册已在 getInstance 中完成）
       if (config.intentResume !== false) {
         const hint = claw.selfAwareness.intentTracker.getResumeHint();
         if (hint) {
@@ -96,10 +164,17 @@ export default async function metooClawHook(event, config = {}) {
       break;
     }
 
-    // ═══ 收到用户消息：硬边界检查 + 写检查点 ═══
+    // ═══ 收到用户消息：先查后答 + 硬边界检查 + 写检查点 ═══
     case 'message:received': {
       const text = event.context?.text || event.context?.message || '';
-      
+
+      // ── 先查：检索上下文情报并立即写入 prompt 文件，让模型本轮就看到 ──
+      if (config.preAnswerLookup !== false) {
+        const intel = await gatherContextIntel(claw, text);
+        if (process.env.METOO_DEBUG) process.stderr.write(`[metoo-debug] intel len=${intel.length} tools=${JSON.stringify(Object.keys(claw.selfAwareness.learningLoop.getStats().tools||{}))}\n`);
+        refreshSystemPromptFile(claw, storageDir, intel);
+      }
+
       // 硬边界检查
       const boundary = claw.selfAwareness.hardBoundary.declare(String(text));
       if (boundary?.blocked) {
@@ -191,7 +266,10 @@ export default async function metooClawHook(event, config = {}) {
   }
 
   // 每个事件处理后刷新 system prompt 附加文件（供 Gateway 补丁读取）
-  refreshSystemPromptFile(claw, storageDir);
+  // 注意：message:received 已在先查阶段带情报刷新过，此处跳过避免覆盖情报
+  if (`${event.type}:${event.action}` !== 'message:received') {
+    refreshSystemPromptFile(claw, storageDir);
+  }
 }
 
 /** 供外部（status 命令等）查询状态 */

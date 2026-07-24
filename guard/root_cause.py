@@ -83,22 +83,20 @@ def get_local_models():
 def diagnose_with_model(component, symptom, logs):
     """优先用本地模型推理根因（免费、快、不依赖 keychain/外网）"""
     prompt = (
-        "你是资深运维专家。系统组件 [%s] 出现异常：%s。\n\n"
-        "以下是相关日志（可能不完整）：\n```\n%s\n```\n\n"
-        "请用简洁中文输出三段（每段一句话）：\n"
-        "根因：<最可能的原因>\n"
-        "修复：<具体可操作的修复步骤>\n"
-        "预防：<如何避免再次发生>\n"
-        "如果日志信息不足，根因写'日志不足，疑似X'。"
+        "系统组件 [%s] 异常：%s。日志：\n```\n%s\n```\n\n"
+        "直接给出诊断结果，禁止输出思考过程。严格按以下三行格式，每行一句：\n"
+        "根因：...\n"
+        "修复：...\n"
+        "预防：..."
     ) % (component, symptom, logs or "（无可用日志）")
 
     body = json.dumps({
         "messages": [
-            {"role": "system", "content": "你是资深运维专家，擅长从日志定位根因。回答简洁、可操作。"},
+            {"role": "system", "content": "你是运维专家。直接给诊断结果，不解释、不思考、只用三行：根因/修复/预防。"},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.2,
-        "max_tokens": 400,
+        "max_tokens": 300,
     })
     for base, model in get_local_models():
         try:
@@ -109,7 +107,12 @@ def diagnose_with_model(component, symptom, logs):
                                capture_output=True, text=True, timeout=35)
             data = json.loads(r.stdout)
             text = data["choices"][0]["message"]["content"].strip()
-            if text and len(text) > 20:
+            # 过滤思考过程泄露（Thinking Process / Analyze 等）
+            text = re.sub(r"(?is)^(thinking process|analyze|let me|让我|思考一下).*?(?=根因[：:])", "", text).strip()
+            m = re.search(r"根因[：:].*", text, re.S)
+            if m:
+                text = m.group(0).strip()
+            if text and "根因" in text and len(text) > 15:
                 return text
         except Exception:
             continue

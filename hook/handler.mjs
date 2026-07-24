@@ -40,6 +40,8 @@ function refreshSystemPromptFile(claw, storageDir, contextIntel = '') {
     if (comp && comp.length > 10) parts.push(comp);
     if (bound && bound.length > 10) parts.push(bound);
     if (contextIntel) parts.push(contextIntel);
+    // 先搜后答：时效性强制指令（始终注入，不依赖数据积累）
+    parts.push(PRE_SEARCH_DIRECTIVE);
     if (parts.length === 0) return;
     const content = '## metoo-claw 自我认知（实时生成）\n\n' + parts.join('\n\n') + '\n';
     const dir = storageDir.replace(/^~/, os.homedir());
@@ -115,6 +117,25 @@ async function gatherContextIntel(claw, userText) {
 
 // 调试导出（测试用）
 export { gatherContextIntel };
+
+/** 先搜后答强制指令：让模型养成涉及时效性信息必须先查的习惯 */
+const PRE_SEARCH_DIRECTIVE = `## 回答前必须执行（先搜后答）
+
+涉及时效性信息时，必须先调用搜索工具获取实时资料，再基于查到的内容回答，禁止仅凭训练数据作答。
+
+触发条件（任一命中即必须搜索）：
+- 新闻、时事、行情、价格、汇率、股价
+- 软件/库/模型的最新版本、更新日志、发布动态
+- 用户提到"最新"、"现在"、"最近"、"今天"、"目前"、"实时"
+- 技术文档、API 用法、开源项目现状（这些会随时间变化）
+- 你不确定是否仍然准确的事实
+
+执行方式：
+1. 优先调用 xiaoyi-web-search（中文优化）或 web_search
+2. 拿到结果后用 web_fetch 抓取关键页面验证细节
+3. 回答时标注信息来源和获取时间
+
+不需要搜索的场景（直接答）：纯编程、逻辑推理、数学计算、翻译润色、闲聊、执行类任务（用户明确说不用查）。`;
 
 /**
  * 主 hook handler

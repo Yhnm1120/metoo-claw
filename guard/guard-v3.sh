@@ -76,6 +76,18 @@ state_changed() {
   return 1
 }
 
+# 告警去重：alert_dedup <key> <窗口秒>，窗口内重复返回 1（不推送）
+alert_dedup() {
+  local key="$1" window="${2:-300}"
+  local now stamp_file last=0
+  now=$(date +%s)
+  stamp_file="/tmp/openclaw-alert/${key//:/_}"
+  [ -f "$stamp_file" ] && last=$(cat "$stamp_file" 2>/dev/null || echo 0)
+  if [ $((now - last)) -lt "$window" ]; then return 1; fi
+  echo "$now" > "$stamp_file"
+  return 0
+}
+
 # ── 主动推送：写入 outbox，metoo-claw 转发给用户 ──────────
 # push_notify <级别:ok|warn|alert> <组件> <消息>
 push_notify() {
@@ -402,6 +414,38 @@ PYEOF
 }
 
 # ══════════════════════════════════════════════════════
+#  指标采集 + 趋势预测（运维大脑）
+# ══════════════════════════════════════════════════════
+GUARD_DIR="$HOME/.openclaw/workspace"
+METRICS_COLLECTOR="$GUARD_DIR/guard/metrics_collector.py"
+TREND_PREDICTOR="$GUARD_DIR/guard/trend_predictor.py"
+
+collect_metrics() {
+  [ -f "$METRICS_COLLECTOR" ] && "$PY3" "$METRICS_COLLECTOR" >/dev/null 2>&1 || true
+}
+
+run_trend_prediction() {
+  [ ! -f "$TREND_PREDICTOR" ] && return 0
+  local alerts
+  alerts=$("$PY3" "$TREND_PREDICTOR" 2>/dev/null | grep -v NO_PREDICTION || true)
+  [ -z "$alerts" ] && return 0
+  # 每条预警去重后推送（同类 6 小时内不重复）
+  echo "$alerts" | while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local comp level msg
+    comp=$(echo "$line" | "$PY3" -c 'import sys,json;print(json.loads(sys.stdin.read()).get("component","?"))' 2>/dev/null || echo "?")
+    level=$(echo "$line" | "$PY3" -c 'import sys,json;print(json.loads(sys.stdin.read()).get("level","warn"))' 2>/dev/null || echo "warn")
+    msg=$(echo "$line" | "$PY3" -c 'import sys,json;print(json.loads(sys.stdin.read()).get("message",""))' 2>/dev/null || echo "")
+    [ -z "$msg" ] && continue
+    # 趋势预警 6 小时去重
+    if alert_dedup "trend:$comp" 21600; then
+      push_notify "$level" "$comp" "$msg"
+      log "📈 趋势预警[$comp]: $msg"
+    fi
+  done
+}
+
+# ══════════════════════════════════════════════════════
 #  主循环
 # ══════════════════════════════════════════════════════
 main() {
@@ -413,6 +457,8 @@ main() {
     check_collector
     check_disk
     check_network
+    collect_metrics        # 采集时序指标
+    run_trend_prediction   # 趋势预测预警
     update_awareness
     sleep "$INTERVAL"
   done

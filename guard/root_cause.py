@@ -107,12 +107,17 @@ def diagnose_with_model(component, symptom, logs):
                                capture_output=True, text=True, timeout=35)
             data = json.loads(r.stdout)
             text = data["choices"][0]["message"]["content"].strip()
-            # 过滤思考过程泄露（Thinking Process / Analyze 等）
-            text = re.sub(r"(?is)^(thinking process|analyze|let me|让我|思考一下).*?(?=根因[：:])", "", text).strip()
-            m = re.search(r"根因[：:].*", text, re.S)
-            if m:
-                text = m.group(0).strip()
-            if text and "根因" in text and len(text) > 15:
+            # 硬提取：只保留"根因:"及之后的内容，前面思考过程全丢弃
+            m = re.search(r"根因[：:]", text)
+            if not m:
+                continue  # 没输出根因，模型没按格式，试下一个
+            text = text[m.start():]
+            # 截到"预防:"那行结束（去掉后续多余思考）
+            lines = [ln for ln in text.split("\n") if re.match(r"^(根因|修复|预防)[：:]", ln.strip())]
+            if len(lines) >= 2:
+                text = "\n".join(lines[:3])
+            text = text.strip()
+            if text and len(text) > 15:
                 return text
         except Exception:
             continue

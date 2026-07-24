@@ -1,0 +1,22 @@
+{
+  "nodes": {
+    "hk_server":   {"name": "HK 服务器", "desc": "47.79.21.43 阿里云香港"},
+    "tunnel":      {"name": "反向隧道", "desc": "Mac -> HK 9999 远程访问通道"},
+    "gateway":     {"name": "OpenClaw Gateway", "desc": ":18789 核心服务"},
+    "collector":   {"name": "采集服务", "desc": ":8099 联网搜索"},
+    "mlx":         {"name": "MLX 引擎", "desc": ":8000 本地推理"},
+    "apfel":       {"name": "Apple 模型", "desc": ":11535 本地轻量模型"},
+    "ollama":      {"name": "Ollama", "desc": ":11434 本地模型"},
+    "metoo_claw":  {"name": "metoo-claw hook", "desc": "时序核心+自我认知"},
+    "visualizer":  {"name": "可视化服务", "desc": ":14337 记忆可视化"}
+  },
+  "edges": [
+    {"from": "hk_server", "to": "tunnel",      "impact": "HK 不可达 → 隧道断 → 无法远程访问 Mac"},
+    {"from": "tunnel",    "to": "gateway",     "impact": "隧道断 → 外部无法连入 Gateway（本地不影响）"},
+    {"from": "gateway",   "to": "metoo_claw",  "impact": "Gateway 挂 → hook 无法注入 → 失去记忆/情报/RAG"},
+    {"from": "gateway",   "to": "apfel",       "impact": "Gateway 挂 → 无法路由到本地模型"},
+    {"from": "mlx",       "to": "gateway",     "impact": "MLX 挂 → 本地 Coder/推理模型不可用（云端不受影响）"},
+    {"from": "collector", "to": "metoo_claw",  "impact": "采集服务挂 → 失去联网搜索/先查后答能力"},
+    {"from": "ollama",    "to": "metoo_claw",  "impact": "Ollama 挂 → 知识库 RAG 检索不可用"}
+  ]
+}

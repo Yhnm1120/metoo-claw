@@ -153,6 +153,44 @@ function drainGuardOutbox() {
   } catch { return ''; }
 }
 
+/** 对话式运维：识别运维类问题，调 ops_query 拿系统数据供回答 */
+const OPS_QUERY = '~/.openclaw/workspace/guard/ops_query.py';
+const OPS_QUERY_CACHE = { result: '', expireAt: 0, cmd: '' };
+const OPS_KEYWORDS = {
+  overview: ['系统怎么样', '系统状态', '运行状况', '健康', '状态如何', '怎么样', '还好吗', '正常吗'],
+  resource: ['占资源', '占内存', '占用', '哪个最', '内存', '磁盘', '空间', '资源'],
+  history: ['为什么卡', '为什么挂', '出问题', '异常', '故障', '重启', '昨天', '刚才', 'crash', '崩溃'],
+};
+async function opsQuery(userText) {
+  // 先判断是否运维类问题（不受缓存影响）
+  const t = String(userText || '');
+  let cmd = null;
+  for (const [sub, kws] of Object.entries(OPS_KEYWORDS)) {
+    if (kws.some(k => t.includes(k))) { cmd = sub; break; }
+  }
+  if (!cmd) return '';
+  // 命中运维问题才查缓存
+  const now = Date.now();
+  if (OPS_QUERY_CACHE.expireAt > now && OPS_QUERY_CACHE.cmd === cmd) return OPS_QUERY_CACHE.result;
+  let result = '';
+  try {
+    const p = OPS_QUERY.replace(/^~/, os.homedir());
+    if (!fs.existsSync(p)) return '';
+    const { execFile } = await import('node:child_process');
+    const raw = await new Promise((resolve) => {
+      execFile('python3', [p, cmd], { timeout: 8000 }, (err, stdout) => {
+        resolve(err ? '' : String(stdout || '').trim());
+      });
+    });
+    if (!raw || raw.length < 10) return '';
+    result = '### 系统运维数据（用户问运维问题，基于此用自然语言回答）\n```json\n' + raw.slice(0, 1500) + '\n```';
+  } catch {}
+  OPS_QUERY_CACHE.result = result;
+  OPS_QUERY_CACHE.cmd = cmd;
+  OPS_QUERY_CACHE.expireAt = now + 30 * 1000; // 30s 缓存
+  return result;
+}
+
 /** 实际的情报检索逻辑（被带缓存的 gatherContextIntel 包装） */
 async function _gatherContextIntelImpl(claw, userText) {
   const sections = [];
@@ -182,6 +220,12 @@ async function _gatherContextIntelImpl(claw, userText) {
     const ragRaw = await ragSearch(text);
     const ragIntel = formatRagIntel(ragRaw);
     if (ragIntel) sections.push(ragIntel);
+  } catch {}
+
+  // 1.6 对话式运维（用户问系统状态/资源/异常时，注入运维数据）
+  try {
+    const opsData = await opsQuery(text);
+    if (opsData) sections.push(opsData);
   } catch {}
 
   // 2. 相关工具的成功率画像（从历史学习）

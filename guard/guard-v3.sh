@@ -218,20 +218,26 @@ check_gateway() {
   if $fixed; then
     log "✅ Gateway 已自动恢复"
     record_fix "P1" "gateway" "gateway not responding" "kickstart/bootstrap"
+    # 自主学习：沉淀有效方案
+    [ -f "$SELF_HEAL" ] && "$PY3" "$SELF_HEAL" learn "gateway" "gateway not responding" "launchctl kickstart/bootstrap" true >/dev/null 2>&1 || true
     push_notify "ok" "gateway" "Gateway 刚才无响应，已自动重启恢复。"
     state_changed "gateway" "2"
     return 0
   fi
 
-  # 修不好 → 智能根因诊断 + 告警推送
+  # 修不好 → 智能根因诊断 + 记录失败（供学习调优）
   log "🚨 Gateway 自愈失败，启动根因诊断..."
   record_fix "P0" "gateway" "gateway restart failed" "unresolved"
+  [ -f "$SELF_HEAL" ] && "$PY3" "$SELF_HEAL" learn "gateway" "gateway not responding" "launchctl kickstart/bootstrap" false >/dev/null 2>&1 || true
   local diag_report=""
   if [ -f "$ROOT_CAUSE" ]; then
     diag_report=$("$PY3" "$ROOT_CAUSE" "gateway" "gateway restart failed, kickstart/bootstrap 无效" 2>/dev/null | "$PY3" -c 'import sys,json;print(json.loads(sys.stdin.read()).get("report",""))' 2>/dev/null || echo "")
   fi
   if [ -n "$diag_report" ]; then
-    push_notify "alert" "gateway" "Gateway 无响应且自动重启失败。诊断：${diag_report}"
+    # 附加变更关联+影响面
+    local extra=""
+    [ -f "$CHANGE_TOPO" ] && extra=$("$PY3" "$CHANGE_TOPO" correlate "gateway" "restart failed" 2>/dev/null || echo "")
+    push_notify "alert" "gateway" "Gateway 无响应且自动重启失败。诊断：${diag_report}${extra:+。$extra}"
   else
     push_notify "alert" "gateway" "Gateway 无响应且自动重启失败，需要人工介入（可尝试手动 launchctl kickstart）。"
   fi
@@ -428,6 +434,8 @@ GUARD_DIR="$HOME/.openclaw/workspace"
 METRICS_COLLECTOR="$GUARD_DIR/guard/metrics_collector.py"
 TREND_PREDICTOR="$GUARD_DIR/guard/trend_predictor.py"
 ROOT_CAUSE="$GUARD_DIR/guard/root_cause.py"
+SELF_HEAL="$GUARD_DIR/guard/self_heal_brain.py"
+CHANGE_TOPO="$GUARD_DIR/guard/change_topology.py"
 
 collect_metrics() {
   [ -f "$METRICS_COLLECTOR" ] && "$PY3" "$METRICS_COLLECTOR" >/dev/null 2>&1 || true

@@ -30,6 +30,9 @@ function getInstance(agentId, sessionKey, storageDir) {
  * 每次 hook 事件后刷新，保证能力/成功率变化实时反映到 prompt。
  * @param {string} contextIntel 可选：针对当前用户消息查到的上下文情报（先查后答）
  */
+// prompt 文件 hash 缓存：内容没变不重写，避免每条消息都写盘
+let lastPromptHash = '';
+
 function refreshSystemPromptFile(claw, storageDir, contextIntel = '') {
   try {
     const parts = [];
@@ -40,10 +43,13 @@ function refreshSystemPromptFile(claw, storageDir, contextIntel = '') {
     if (comp && comp.length > 10) parts.push(comp);
     if (bound && bound.length > 10) parts.push(bound);
     if (contextIntel) parts.push(contextIntel);
-    // 先搜后答：时效性强制指令（始终注入，不依赖数据积累）
     parts.push(PRE_SEARCH_DIRECTIVE);
     if (parts.length === 0) return;
     const content = '## metoo-claw 自我认知（实时生成）\n\n' + parts.join('\n\n') + '\n';
+    // hash 对比：内容没变则跳过写盘
+    const hash = String(content.length) + ':' + content.slice(0, 64);
+    if (hash === lastPromptHash) return;
+    lastPromptHash = hash;
     const dir = storageDir.replace(/^~/, os.homedir());
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'system-prompt-extra.md'), content, 'utf-8');
@@ -52,11 +58,29 @@ function refreshSystemPromptFile(claw, storageDir, contextIntel = '') {
   }
 }
 
-/**
- * 先查后答：收到用户消息后，主动检索相关上下文情报，
- * 让模型回答前就看到（历史意图、相似任务经验、工具成功率、用户偏好）。
- */
+// 情报查询 TTL 缓存：相同查询 30 秒内复用，避免重复全量检索
+const intelCache = new Map(); // key -> { intel, expireAt }
+const INTEL_TTL = 30 * 1000;
+
 async function gatherContextIntel(claw, userText) {
+  const text = String(userText || '').trim();
+  if (!text) return '';
+  // 用文本前 40 字符做缓存 key（同一会话内相似查询复用）
+  const cacheKey = text.slice(0, 40);
+  const cached = intelCache.get(cacheKey);
+  if (cached && cached.expireAt > Date.now()) return cached.intel;
+  const intel = await _gatherContextIntelImpl(claw, text);
+  intelCache.set(cacheKey, { intel, expireAt: Date.now() + INTEL_TTL });
+  // 缓存清理：防止无限增长
+  if (intelCache.size > 50) {
+    const now = Date.now();
+    for (const [k, v] of intelCache) if (v.expireAt <= now) intelCache.delete(k);
+  }
+  return intel;
+}
+
+/** 实际的情报检索逻辑（被带缓存的 gatherContextIntel 包装） */
+async function _gatherContextIntelImpl(claw, userText) {
   const sections = [];
   const text = String(userText || '').trim();
   if (!text) return '';
@@ -213,8 +237,8 @@ export default async function metooClawHook(event, config = {}) {
         event.messages.push(boundary.declaration);
       }
 
-      // 写检查点
-      await claw.temporalCore.checkpoint.writeCheckpoint({
+      // 写检查点（惰性：不 await，后台写，不阻塞响应链路）
+      claw.temporalCore.checkpoint.writeCheckpoint({
         session_id: sessionKey,
         timestamp: Date.now(),
         type: 'user_message',
@@ -228,7 +252,7 @@ export default async function metooClawHook(event, config = {}) {
           capability_state_hash: '',
         },
         model_state: { system_prompt_hash: '' },
-      });
+      }).catch(() => {}); // 后台静默写盘，失败不影响响应
       break;
     }
 
